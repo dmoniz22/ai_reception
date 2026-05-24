@@ -3,7 +3,6 @@ import audioop
 import base64
 import json
 import sys
-import wave
 
 import numpy as np
 import websockets

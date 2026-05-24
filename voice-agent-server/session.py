@@ -3,13 +3,19 @@ import audioop
 import json
 import logging
 import base64
+import uuid
+from datetime import datetime, timezone
 
 import numpy as np
 import websockets
+from sqlalchemy import select
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from config import settings
 from agent_config import build_settings
+from models.database import async_session
+from models.customer import Customer
+from models.call_log import CallLog
 
 logger = logging.getLogger(__name__)
 
@@ -25,23 +31,27 @@ class VoiceAgentSession:
         stream_sid: str,
         call_sid: str,
         customer_id: str | None = None,
-        agent_id: str | None = None,
-        business_name: str = "AI Receptionist",
-        greeting: str | None = None,
+        caller_number: str | None = None,
     ):
         self.twilio_ws = twilio_ws
         self.stream_sid = stream_sid
         self.call_sid = call_sid
         self.customer_id = customer_id
-        self.agent_id = agent_id
-        self.business_name = business_name
-        self.greeting = greeting
+        self.caller_number = caller_number
 
         self.dg_ws: websockets.WebSocketClientProtocol | None = None
         self.running = False
 
+        self._customer: Customer | None = None
+        self._started_at: datetime | None = None
+        self._call_log_id: uuid.UUID | None = None
+
     async def run(self) -> None:
         try:
+            if self.customer_id:
+                await self._load_customer()
+
+            await self._create_call_log()
             await self._connect_deepgram()
 
             self.running = True
@@ -65,21 +75,72 @@ class VoiceAgentSession:
             logger.exception("VoiceAgentSession failed for call %s", self.call_sid)
         finally:
             self.running = False
+            await self._finalize_call_log()
             await self._cleanup()
+
+    async def _load_customer(self) -> None:
+        async with async_session() as db:
+            result = await db.execute(
+                select(Customer).where(Customer.id == uuid.UUID(self.customer_id))
+            )
+            self._customer = result.scalar_one_or_none()
+
+            if self._customer:
+                logger.info(
+                    "Loaded customer %s (%s)",
+                    self._customer.business_name,
+                    self._customer.id,
+                )
+            else:
+                logger.warning("Customer %s not found, using defaults", self.customer_id)
+
+    async def _create_call_log(self) -> None:
+        self._started_at = datetime.now(timezone.utc)
+        async with async_session() as db:
+            log = CallLog(
+                customer_id=uuid.UUID(self.customer_id) if self.customer_id else uuid.uuid4(),
+                caller_number=self.caller_number or "unknown",
+                call_sid=self.call_sid,
+                started_at=self._started_at,
+            )
+            db.add(log)
+            await db.commit()
+            self._call_log_id = log.id
+            logger.info("Created call log %s", self._call_log_id)
+
+    async def _finalize_call_log(self) -> None:
+        if not self._call_log_id:
+            return
+        ended_at = datetime.now(timezone.utc)
+        duration = None
+        if self._started_at:
+            duration = int((ended_at - self._started_at).total_seconds())
+
+        async with async_session() as db:
+            log = await db.get(CallLog, self._call_log_id)
+            if log:
+                log.ended_at = ended_at
+                log.duration_seconds = duration
+                await db.commit()
+                logger.info("Finalized call log %s (duration: %ss)", self._call_log_id, duration)
 
     async def _connect_deepgram(self) -> None:
         headers = {"Authorization": f"Token {settings.deepgram_api_key}"}
 
         self.dg_ws = await websockets.connect(DG_WS_URL, additional_headers=headers)
-        logger.info("Connected to Deepgram Voice Agent for call %s", self.call_sid)
+        logger.info("Connected to Deepgram for call %s", self.call_sid)
 
-        settings_msg = build_settings(
-            business_name=self.business_name,
-            greeting=self.greeting,
-        )
-
-        if self.agent_id:
-            settings_msg["agent"]["agent_id"] = self.agent_id
+        if self._customer:
+            settings_msg = build_settings(
+                business_name=self._customer.business_name,
+                greeting=self._customer.greeting,
+                business_hours=str(self._customer.business_hours or "Monday-Friday 9am-5pm"),
+                faqs=str(self._customer.faqs or "No FAQs configured yet."),
+            )
+            if self._customer.deepgram_agent_id:
+                settings_msg["agent"]["agent_id"] = self._customer.deepgram_agent_id
+        else:
+            settings_msg = build_settings()
 
         await self.dg_ws.send(json.dumps(settings_msg))
         logger.info("Sent agent settings to Deepgram")
@@ -173,7 +234,8 @@ class VoiceAgentSession:
                     elif event_type == "AgentV1Error":
                         logger.error("Deepgram error: %s", event)
                     elif event_type == "AgentV1ConversationText":
-                        logger.info("Conversation: %s", event.get("payload", {}).get("text", ""))
+                        text = event.get("payload", {}).get("text", "")
+                        logger.info("Conversation: %s", text)
 
         except Exception:
             if self.running:
@@ -196,6 +258,7 @@ class VoiceAgentSession:
         logger.info("Function call: %s args=%s", func_name, func_args)
 
         if func_name == "take_message":
+            await self._save_message(func_args)
             response_msg = json.dumps({
                 "status": "message_taken",
                 "message": "Your message has been saved and the owner will be notified.",
@@ -205,6 +268,7 @@ class VoiceAgentSession:
                 "status": "transferring",
                 "message": "Transferring to the owner now.",
             })
+            await self._update_call_outcome("transferred")
         elif func_name in ("check_availability", "book_appointment"):
             response_msg = json.dumps({
                 "status": "unavailable",
@@ -223,6 +287,32 @@ class VoiceAgentSession:
 
         if self.dg_ws and self.running:
             await self.dg_ws.send(json.dumps(response))
+
+    async def _save_message(self, args: dict) -> None:
+        from models.call_log import Message
+        async with async_session() as db:
+            message = Message(
+                call_log_id=self._call_log_id,
+                customer_id=uuid.UUID(self.customer_id) if self.customer_id else uuid.uuid4(),
+                caller_name=args.get("caller_name"),
+                caller_number=args.get("callback_number", self.caller_number),
+                message_text=args.get("message"),
+                urgency=args.get("urgency", "normal"),
+            )
+            db.add(message)
+            await db.commit()
+            logger.info("Saved message for customer %s", self.customer_id)
+
+    async def _update_call_outcome(self, outcome: str) -> None:
+        if not self._call_log_id:
+            return
+        async with async_session() as db:
+            log = await db.get(CallLog, self._call_log_id)
+            if log:
+                log.outcome = outcome
+                if outcome == "transferred":
+                    log.transferred_to_owner = True
+                await db.commit()
 
     async def _cleanup(self) -> None:
         if self.dg_ws:

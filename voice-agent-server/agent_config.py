@@ -1,5 +1,3 @@
-import json
-import httpx
 from config import settings
 
 DG_AGENT_API = "https://api.deepgram.com/v1/projects"
@@ -176,45 +174,3 @@ def build_functions() -> list[dict]:
         },
     ]
 
-
-async def create_reusable_agent_config(
-    business_name: str,
-    greeting: str | None = None,
-    business_hours: str = "Monday-Friday 9am-5pm",
-    faqs: str = "No FAQs configured yet.",
-) -> str:
-    """Create a Deepgram Reusable Agent Configuration, return the agent_id."""
-    config = build_settings(
-        business_name=business_name,
-        greeting=greeting,
-        business_hours=business_hours,
-        faqs=faqs,
-    )
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            f"{DG_AGENT_API}/{settings.deepgram_project_id}/agents",
-            headers={
-                "Authorization": f"Token {settings.deepgram_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "name": f"Agent for {business_name}",
-                "config": config,
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["agent_id"]
-
-
-async def delete_reusable_agent_config(agent_id: str) -> None:
-    """Delete a Deepgram Reusable Agent Configuration."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.delete(
-            f"{DG_AGENT_API}/{settings.deepgram_project_id}/agents/{agent_id}",
-            headers={
-                "Authorization": f"Token {settings.deepgram_api_key}",
-            },
-        )
-        response.raise_for_status()

@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     internal_api_key: str = ""
 
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/ai_reception"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@postgres:5432/ai_reception"
 
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
@@ -27,6 +27,8 @@ class Settings(BaseSettings):
 
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
+
+    twilio_phone_number_sid: str = ""
 
 
 settings = Settings()
