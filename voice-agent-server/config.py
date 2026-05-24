@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     ollama_cloud_endpoint: str = "https://api.ollama.com/v1"
 
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8001
 
     internal_api_key: str = ""
 

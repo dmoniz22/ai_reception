@@ -67,7 +67,7 @@ Use `websockets` library (not Starlette's built-in) for the Deepgram connection 
 
 **`agent_config.py`** — Hardcoded single config for now (multi-tenant UUIDs come in Iteration 2). Embed the system prompt, functions, and voice settings from the design spec.
 
-**`dev_client.py`** — Local test harness: captures mic via PyAudio, sends to `ws://localhost:8000/twilio`, plays returned audio through speakers.
+**`dev_client.py`** — Local test harness: captures mic via PyAudio, sends to `ws://localhost:8001/twilio`, plays returned audio through speakers.
 
 ### Verification
 - [ ] `python dev_client.py` → speak into mic → hear AI response through speakers
@@ -300,13 +300,13 @@ Dashboard uses a **collapsible sidebar** — expands on desktop, collapses to ic
 ```yaml
 services:
   postgres:     # pgvector/pgvector:pg16
-  server:       # voice-agent-server (uvicorn, port 8000)
-  frontend:     # Next.js (npm run start, port 3000)
+  server:       # voice-agent-server (uvicorn, port 8001)
+  frontend:     # Next.js (npm run start, port 3002)
 ```
 
-All on a bridge network. Only `frontend` (port 3000) and optionally `server` (port 8000 for health checks) exposed. Traefik routes:
-- `reception.monizhealth.com` → frontend:3000
-- `api.reception.monizhealth.com` → server:8000
+All on a bridge network. Only `frontend` (port 3002) and optionally `server` (port 8001 for health checks) exposed. Traefik routes:
+- `reception.monizhealth.com` → frontend:3002
+- `api.reception.monizhealth.com` → server:8001
 
 ### Production Hardening
 - Rate limiting per customer (prevent single caller from spamming)

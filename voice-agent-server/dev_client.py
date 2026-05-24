@@ -14,7 +14,7 @@ except ImportError:
     print("pyaudio not installed. Run: pip install pyaudio")
     sys.exit(1)
 
-SERVER_URL = "ws://localhost:8000/twilio"
+SERVER_URL = "ws://localhost:8001/twilio"
 
 CHUNK = 320
 FORMAT = pyaudio.paInt16

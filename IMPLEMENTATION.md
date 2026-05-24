@@ -230,7 +230,7 @@ SCHEDULING_FUNCTIONS = [
             "required": ["date"]
         },
         "endpoint": {
-            "url": "http://localhost:8000/api/scheduling/availability",
+            "url": "http://localhost:8001/api/scheduling/availability",
             "method": "post",
             "headers": {
                 "Authorization": "Bearer {{INTERNAL_API_KEY}}"
@@ -252,7 +252,7 @@ SCHEDULING_FUNCTIONS = [
             "required": ["date", "time", "name", "phone"]
         },
         "endpoint": {
-            "url": "http://localhost:8000/api/scheduling/book",
+            "url": "http://localhost:8001/api/scheduling/book",
             "method": "post",
             "headers": {
                 "Authorization": "Bearer {{INTERNAL_API_KEY}}"
@@ -518,8 +518,8 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8000:8000"
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
+      - "8001:8001"
+    command: uvicorn main:app --host 0.0.0.0 --port 8001
 
   frontend:
     build: ./frontend
@@ -528,7 +528,7 @@ services:
     depends_on:
       - server
     ports:
-      - "3000:3000"
+      - "3002:3002"
     command: npm run dev
 
 volumes:
