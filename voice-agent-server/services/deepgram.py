@@ -18,6 +18,7 @@ async def create_agent_config(customer: dict) -> str:
         greeting=customer.get("greeting"),
         business_hours=str(customer.get("business_hours", "Monday-Friday 9am-5pm")),
         faqs=str(customer.get("faqs", "No FAQs configured yet.")),
+        customer_id=customer.get("id", ""),
     )
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -70,6 +71,7 @@ async def update_agent_config(agent_id: str, customer: dict) -> None:
         greeting=customer.get("greeting"),
         business_hours=str(customer.get("business_hours", "Monday-Friday 9am-5pm")),
         faqs=str(customer.get("faqs", "No FAQs configured yet.")),
+        customer_id=customer.get("id", ""),
     )
 
     async with httpx.AsyncClient(timeout=30.0) as client:

@@ -6,6 +6,7 @@ import base64
 import uuid
 from datetime import datetime, timezone
 
+import httpx
 import numpy as np
 import websockets
 from sqlalchemy import select
@@ -15,7 +16,8 @@ from config import settings
 from agent_config import build_settings
 from models.database import async_session
 from models.customer import Customer
-from models.call_log import CallLog
+from models.call_log import CallLog, Message
+from services.twilio_client import send_sms
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,7 @@ class VoiceAgentSession:
         self._customer: Customer | None = None
         self._started_at: datetime | None = None
         self._call_log_id: uuid.UUID | None = None
+        self._transcript_lines: list[str] = []
 
     async def run(self) -> None:
         try:
@@ -75,7 +78,7 @@ class VoiceAgentSession:
             logger.exception("VoiceAgentSession failed for call %s", self.call_sid)
         finally:
             self.running = False
-            await self._finalize_call_log()
+            await self._finalize_call()
             await self._cleanup()
 
     async def _load_customer(self) -> None:
@@ -84,13 +87,8 @@ class VoiceAgentSession:
                 select(Customer).where(Customer.id == uuid.UUID(self.customer_id))
             )
             self._customer = result.scalar_one_or_none()
-
             if self._customer:
-                logger.info(
-                    "Loaded customer %s (%s)",
-                    self._customer.business_name,
-                    self._customer.id,
-                )
+                logger.info("Loaded customer %s (%s)", self._customer.business_name, self._customer.id)
             else:
                 logger.warning("Customer %s not found, using defaults", self.customer_id)
 
@@ -108,25 +106,8 @@ class VoiceAgentSession:
             self._call_log_id = log.id
             logger.info("Created call log %s", self._call_log_id)
 
-    async def _finalize_call_log(self) -> None:
-        if not self._call_log_id:
-            return
-        ended_at = datetime.now(timezone.utc)
-        duration = None
-        if self._started_at:
-            duration = int((ended_at - self._started_at).total_seconds())
-
-        async with async_session() as db:
-            log = await db.get(CallLog, self._call_log_id)
-            if log:
-                log.ended_at = ended_at
-                log.duration_seconds = duration
-                await db.commit()
-                logger.info("Finalized call log %s (duration: %ss)", self._call_log_id, duration)
-
     async def _connect_deepgram(self) -> None:
         headers = {"Authorization": f"Token {settings.deepgram_api_key}"}
-
         self.dg_ws = await websockets.connect(DG_WS_URL, additional_headers=headers)
         logger.info("Connected to Deepgram for call %s", self.call_sid)
 
@@ -136,6 +117,7 @@ class VoiceAgentSession:
                 greeting=self._customer.greeting,
                 business_hours=str(self._customer.business_hours or "Monday-Friday 9am-5pm"),
                 faqs=str(self._customer.faqs or "No FAQs configured yet."),
+                customer_id=str(self._customer.id),
             )
             if self._customer.deepgram_agent_id:
                 settings_msg["agent"]["agent_id"] = self._customer.deepgram_agent_id
@@ -149,9 +131,7 @@ class VoiceAgentSession:
         try:
             while self.running:
                 try:
-                    msg = await asyncio.wait_for(
-                        self.twilio_ws.receive_text(), timeout=1.0
-                    )
+                    msg = await asyncio.wait_for(self.twilio_ws.receive_text(), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue
                 except WebSocketDisconnect:
@@ -168,17 +148,13 @@ class VoiceAgentSession:
 
                 if event == "media":
                     media = data.get("media", {})
-                    track = media.get("track")
-
-                    if track == "inbound":
+                    if media.get("track") == "inbound":
                         payload_b64 = media.get("payload", "")
                         if not payload_b64:
                             continue
-
                         mulaw_bytes = base64.b64decode(payload_b64)
                         linear16 = audioop.ulaw2lin(mulaw_bytes, 2)
                         resampled = _resample_8000_to_24000(linear16)
-
                         if self.dg_ws and self.running:
                             await self.dg_ws.send(resampled)
 
@@ -207,16 +183,11 @@ class VoiceAgentSession:
                     resampled = _resample_24000_to_8000(msg)
                     mulaw_bytes = audioop.lin2ulaw(resampled, 2)
                     payload_b64 = base64.b64encode(mulaw_bytes).decode("ascii")
-
                     response = json.dumps({
                         "event": "media",
                         "streamSid": self.stream_sid,
-                        "media": {
-                            "track": "outbound",
-                            "payload": payload_b64,
-                        },
+                        "media": {"track": "outbound", "payload": payload_b64},
                     })
-
                     if self.running:
                         await self.twilio_ws.send_text(response)
 
@@ -227,15 +198,24 @@ class VoiceAgentSession:
                         continue
 
                     event_type = event.get("type", "")
-                    logger.debug("Deepgram event: %s", event_type)
 
-                    if event_type == "AgentV1FunctionCallRequest":
+                    if event_type == "AgentV1ConversationText":
+                        text = event.get("payload", {}).get("text", "")
+                        role = event.get("payload", {}).get("role", "unknown")
+                        self._transcript_lines.append(f"{role}: {text}")
+                        logger.debug("Transcript: [%s] %s", role, text)
+
+                    elif event_type == "AgentV1FunctionCallRequest":
                         await self._handle_function_call(event)
+
+                    elif event_type == "AgentV1UserStartedSpeaking":
+                        logger.debug("User started speaking")
+
+                    elif event_type == "AgentV1AgentThinking":
+                        logger.debug("Agent thinking")
+
                     elif event_type == "AgentV1Error":
                         logger.error("Deepgram error: %s", event)
-                    elif event_type == "AgentV1ConversationText":
-                        text = event.get("payload", {}).get("text", "")
-                        logger.info("Conversation: %s", text)
 
         except Exception:
             if self.running:
@@ -264,32 +244,23 @@ class VoiceAgentSession:
                 "message": "Your message has been saved and the owner will be notified.",
             })
         elif func_name == "transfer_to_owner":
+            await self._update_call_outcome("transferred")
             response_msg = json.dumps({
                 "status": "transferring",
                 "message": "Transferring to the owner now.",
-            })
-            await self._update_call_outcome("transferred")
-        elif func_name in ("check_availability", "book_appointment"):
-            response_msg = json.dumps({
-                "status": "unavailable",
-                "message": "Scheduling is not yet configured. Please leave a message and we'll call you back.",
             })
         else:
             response_msg = json.dumps({"status": "unknown_function"})
 
         response = {
             "type": "AgentV1SendFunctionCallResponse",
-            "payload": {
-                "call_id": call_id,
-                "response": response_msg,
-            },
+            "payload": {"call_id": call_id, "response": response_msg},
         }
 
         if self.dg_ws and self.running:
             await self.dg_ws.send(json.dumps(response))
 
     async def _save_message(self, args: dict) -> None:
-        from models.call_log import Message
         async with async_session() as db:
             message = Message(
                 call_log_id=self._call_log_id,
@@ -313,6 +284,69 @@ class VoiceAgentSession:
                 if outcome == "transferred":
                     log.transferred_to_owner = True
                 await db.commit()
+
+    async def _finalize_call(self) -> None:
+        ended_at = datetime.now(timezone.utc)
+        duration = None
+        if self._started_at:
+            duration = int((ended_at - self._started_at).total_seconds())
+
+        transcript = "\n".join(self._transcript_lines) if self._transcript_lines else ""
+        summary = await self._generate_summary(transcript) if transcript else None
+
+        async with async_session() as db:
+            log = await db.get(CallLog, self._call_log_id) if self._call_log_id else None
+            if log:
+                log.ended_at = ended_at
+                log.duration_seconds = duration
+                if summary:
+                    log.summary = summary
+                if not log.outcome:
+                    log.outcome = "completed"
+                await db.commit()
+                logger.info("Finalized call log %s (duration: %ss, summary: %s)",
+                           self._call_log_id, duration, bool(summary))
+
+        if summary and self._customer and self._customer.phone:
+            sms_body = (
+                f"AI Receptionist — Call Summary\n"
+                f"From: {self.caller_number or 'Unknown'}\n"
+                f"Duration: {duration}s\n\n"
+                f"{summary}"
+            )
+            send_sms(self._customer.phone, sms_body)
+
+    async def _generate_summary(self, transcript: str) -> str | None:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{settings.ollama_cloud_endpoint}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {settings.ollama_cloud_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "deepseek-v4-flash",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Summarize this phone call transcript in 1-2 sentences. "
+                                    "Mention: who called, what they wanted, what was resolved or scheduled."
+                                ),
+                            },
+                            {"role": "user", "content": transcript},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 150,
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.error("Failed to generate summary: %s", e)
+            return None
 
     async def _cleanup(self) -> None:
         if self.dg_ws:

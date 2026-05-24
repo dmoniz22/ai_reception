@@ -14,6 +14,7 @@ from routers.customers import (
     get_customer_calls,
 )
 from routers.health import health_check
+from routers.admin import availability, book, oauth_authorize, oauth_callback
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +33,10 @@ routes = [
     Route("/api/customers/{customer_id:uuid}", update_customer, methods=["PUT"]),
     Route("/api/customers/{customer_id:uuid}", delete_customer, methods=["DELETE"]),
     Route("/api/customers/{customer_id:uuid}/calls", get_customer_calls, methods=["GET"]),
+    Route("/api/scheduling/{customer_id:path}/availability", availability, methods=["POST"]),
+    Route("/api/scheduling/{customer_id:path}/book", book, methods=["POST"]),
+    Route("/api/scheduling/oauth/authorize", oauth_authorize, methods=["GET"]),
+    Route("/api/scheduling/oauth/callback", oauth_callback, methods=["GET"]),
 ]
 
 app = Starlette(routes=routes)

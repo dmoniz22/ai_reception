@@ -9,3 +9,4 @@ sqlalchemy[asyncio]>=2.0.30
 asyncpg>=0.29.0
 psycopg2-binary>=2.9.9
 twilio>=9.1.0
+stripe>=10.0.0
