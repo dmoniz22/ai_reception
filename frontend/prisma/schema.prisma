@@ -1,0 +1,80 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id             String    @id @default(uuid()) @db.Uuid
+  email          String    @unique
+  passwordHash   String    @map("password_hash")
+  customerId     String?   @unique @map("customer_id") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+model Customer {
+  id                  String    @id @default(uuid()) @db.Uuid
+  businessName        String    @map("business_name")
+  ownerName           String?   @map("owner_name")
+  email               String    @unique
+  phone               String?
+  timezone            String    @default("America/Vancouver")
+  twilioPhoneNumber   String?   @map("twilio_phone_number")
+  deepgramAgentId     String?   @map("deepgram_agent_id")
+  systemPrompt        String?   @map("system_prompt")
+  businessHours       Json?     @map("business_hours")
+  faqs                Json?     @map("faqs")
+  greeting            String?
+  calendarIntegration String?   @map("calendar_integration")
+  calendarCredentials Json?     @map("calendar_credentials")
+  stripeCustomerId    String?   @map("stripe_customer_id")
+  stripeSubscriptionId String?  @map("stripe_subscription_id")
+  status              String    @default("active")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  callLogs CallLog[]
+
+  @@map("customers")
+}
+
+model CallLog {
+  id                 String    @id @default(uuid()) @db.Uuid
+  customerId         String    @map("customer_id") @db.Uuid
+  callerNumber       String    @map("caller_number")
+  callSid            String?   @unique @map("call_sid")
+  startedAt          DateTime  @default(now()) @map("started_at")
+  endedAt            DateTime? @map("ended_at")
+  durationSeconds    Int?      @map("duration_seconds")
+  transcriptUrl      String?   @map("transcript_url")
+  recordingUrl       String?   @map("recording_url")
+  outcome            String?
+  transferredToOwner Boolean   @default(false) @map("transferred_to_owner")
+  summary            String?
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  customer Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId])
+  @@map("call_logs")
+}
+
+model Message {
+  id           String    @id @default(uuid()) @db.Uuid
+  callLogId    String?   @map("call_log_id") @db.Uuid
+  customerId   String    @map("customer_id") @db.Uuid
+  callerName   String?   @map("caller_name")
+  callerNumber String?   @map("caller_number")
+  messageText  String?   @map("message_text")
+  urgency      String    @default("normal")
+  smsSentToOwner Boolean @default(false) @map("sms_sent_to_owner")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([customerId])
+  @@map("messages")
+}
