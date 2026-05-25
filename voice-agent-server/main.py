@@ -1,9 +1,13 @@
 import logging
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.routing import Route, WebSocketRoute
 
 from config import settings
+from middleware.rate_limit import RateLimitMiddleware
+from middleware.logging import setup_logging
 from routers.telephony import incoming_call, twilio_websocket
 from routers.customers import (
     list_customers,
@@ -16,10 +20,9 @@ from routers.customers import (
 from routers.health import health_check
 from routers.admin import availability, book, oauth_authorize, oauth_callback
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+setup_logging("INFO")
+
+logger = logging.getLogger(__name__)
 
 routes = [
     Route("/health", health_check, methods=["GET"]),
@@ -39,14 +42,30 @@ routes = [
     Route("/api/scheduling/oauth/callback", oauth_callback, methods=["GET"]),
 ]
 
-app = Starlette(routes=routes)
+middleware = [
+    Middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3002", f"https://{settings.domain}"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    ),
+    Middleware(RateLimitMiddleware),
+]
+
+app = Starlette(routes=routes, middleware=middleware)
 
 
 @app.on_event("startup")
 async def startup() -> None:
     from models.database import init_db
     await init_db()
-    logging.getLogger(__name__).info("Database initialized")
+    logger.info("Database initialized")
+    logger.info("Server ready on %s:%s", settings.host, settings.port)
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    logger.info("Server shutting down gracefully")
 
 
 if __name__ == "__main__":
@@ -56,5 +75,6 @@ if __name__ == "__main__":
         "main:app",
         host=settings.host,
         port=settings.port,
+        log_config=None,
         log_level="info",
     )

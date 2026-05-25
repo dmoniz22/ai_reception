@@ -6,8 +6,6 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: ai_reception
-    ports:
-      - "5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -15,6 +13,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - app
 
   server:
     build: ./voice-agent-server
@@ -23,9 +23,31 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/ai_reception
     ports:
       - "8001:8001"
-    command: uvicorn main:app --host 0.0.0.0 --port 8001
+    command: uvicorn main:app --host 0.0.0.0 --port 8001 --log-level info
+    networks:
+      - app
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - server
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/ai_reception
+      - NEXT_PUBLIC_API_URL=http://server:8001
+    ports:
+      - "3002:3000"
+    networks:
+      - app
+
+networks:
+  app:
+    driver: bridge
 
 volumes:
   pgdata:
